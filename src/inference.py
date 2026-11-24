@@ -2,10 +2,6 @@ import sys
 import os
 import time
 
-# Redirect PyTorch and XDG caches to E: drive to prevent C: drive filling up
-os.environ['TORCH_HOME'] = r'E:\torch_cache'
-os.environ['XDG_CACHE_HOME'] = r'E:\torch_cache'
-
 # Ensure src directory is in path for local imports
 sys.path.append(os.path.dirname(__file__))
 
@@ -36,9 +32,18 @@ logger = logging.getLogger(__name__)
 class VisionExtractPipeline:
     def __init__(self, model_path=None, device=None, image_size=256):
         self.device = device if device else torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.image_size = 256 # Fixed to 256 for stable results
+        self.image_size = 256 # Standard resolution
         self.model = UNet().to(self.device)
         
+        # Auto-detect default best_model.pth if no path is passed
+        if not model_path:
+            project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            candidate = os.path.join(project_dir, "checkpoints", "best_model.pth")
+            if os.path.exists(candidate):
+                model_path = candidate
+            elif os.path.exists("checkpoints/best_model.pth"):
+                model_path = "checkpoints/best_model.pth"
+
         if model_path and os.path.exists(model_path):
             try:
                 checkpoint = torch.load(model_path, map_location=self.device)
@@ -46,9 +51,9 @@ class VisionExtractPipeline:
                     self.model.load_state_dict(checkpoint['model_state_dict'])
                 else:
                     self.model.load_state_dict(checkpoint)
-                logger.info(f"Model loaded from {model_path}")
+                logger.info(f"Model loaded successfully from {model_path}")
             except Exception as e:
-                logger.error(f"Failed to load weight: {e}. Using random weights.")
+                logger.error(f"Failed to load weight: {e}. Using uninitialized weights.")
         else:
             logger.warning("No model path provided or file doesn't exist. Model is uninitialized.")
             
@@ -56,7 +61,7 @@ class VisionExtractPipeline:
         self.valid_formats = (".jpg", ".png", ".jpeg")
 
     def full_pipeline(self, image_path, output_path=None, save=True, display=False, custom_size=None):
-        """Standard segmentation pipeline: Preprocess -> Predict -> Crop -> Upscale."""
+        """Standard segmentation pipeline: Preprocess -> Predict -> Postprocess -> Upscale."""
         if not image_path.lower().endswith(self.valid_formats):
             raise ValueError(f"Invalid image format: {image_path}. Supported: {self.valid_formats}")
 
@@ -66,7 +71,6 @@ class VisionExtractPipeline:
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         h_orig, w_orig = image.shape[:2]
         
-        # Determine image size for inference
         target_size = custom_size if custom_size else self.image_size
         transforms = get_val_transforms(image_size=target_size)
         
@@ -77,25 +81,26 @@ class VisionExtractPipeline:
         # 2. Prediction
         with torch.no_grad():
             output = self.model(input_tensor)
-            # Use raw probabilities for smooth alpha-matting
             prediction = torch.sigmoid(output).squeeze().cpu().numpy()
 
-        # 3. Handle Padding Adjustment 
-        # Standard centering logic to undo PadIfNeeded (from dataset.py)
+        # 3. Handle Padding Adjustment (undo PadIfNeeded)
         scale = target_size / max(h_orig, w_orig)
         new_h, new_w = int(h_orig * scale), int(w_orig * scale)
         pad_top = (target_size - new_h) // 2
         pad_left = (target_size - new_w) // 2
         
-        # Extract correctly aligned valid region
         valid_mask = prediction[pad_top:pad_top+new_h, pad_left:pad_left+new_w]
 
-        # 4. Final Upscale & Matting
-        # Resize mask back to original resolution for smooth, high-fidelity isolation
+        # 4. Final Upscale & Morphological Noise Removal
         final_mask = cv2.resize(valid_mask, (w_orig, h_orig), interpolation=cv2.INTER_LINEAR)
-        
-        # Apply mask to isolate subject
-        isolated = (image * final_mask[:, :, None]).astype(np.uint8)
+        pred_bin = (final_mask > 0.5).astype(np.uint8)
+        kernel = np.ones((5, 5), np.uint8)
+        refined_bin = cv2.morphologyEx(pred_bin, cv2.MORPH_OPEN, kernel)
+        refined_bin = cv2.morphologyEx(refined_bin, cv2.MORPH_CLOSE, kernel)
+
+        # Smooth edges for natural isolation while forcing strict pitch-black background
+        clean_mask = np.where(refined_bin == 1, np.clip(final_mask, 0.7, 1.0), 0.0).astype(np.float32)
+        isolated = (image * clean_mask[:, :, None]).astype(np.uint8)
 
         # Save Output
         if save:
@@ -113,10 +118,10 @@ class VisionExtractPipeline:
         if display:
             plt.figure(figsize=(10, 5))
             plt.subplot(1, 2, 1); plt.imshow(image); plt.title("Original")
-            plt.subplot(1, 2, 2); plt.imshow(isolated); plt.title("Isolated (Standard)")
+            plt.subplot(1, 2, 2); plt.imshow(isolated); plt.title("Isolated (VisionExtract)")
             plt.show()
 
-        return isolated, final_mask
+        return isolated, clean_mask
 
     def batch_inference(self, folder_path, output_dir="outputs"):
         """Process all images in a folder using the standard pipeline."""
@@ -162,7 +167,6 @@ if __name__ == "__main__":
                 if "best_model.pth" in checkpoints:
                     model_path = os.path.join(checkpoint_dir, "best_model.pth")
                 else:
-                    # Sort to get latest epoch
                     checkpoints.sort(key=lambda x: int(x.split('_')[-1].split('.')[0]) if 'epoch' in x else 0)
                     model_path = os.path.join(checkpoint_dir, checkpoints[-1])
             

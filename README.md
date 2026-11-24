@@ -87,8 +87,8 @@ VisionExtract/
 
 ### 1. Environment Setup
 ```bash
-git clone https://github.com/biswajeet111/VisionExtract.git
-cd VisionExtract
+git clone https://github.com/balajirapolu/Vision-Extract.git
+cd Vision-Extract
 python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt
@@ -112,14 +112,5 @@ python src/inference.py --image path/to/sample.jpg --display
 python src/train.py
 ```
 
----
-
-## 👤 Author
-
-**Biswajeet Kumar**
-*   **Portfolio**: [GitHub](https://github.com/biswajeet111)
-*   **Connect**: [LinkedIn](https://www.linkedin.com/in/biswajeet-kumar-a70043362)
-
----
 
 *Developed as a high-performance solution for Automated Subject Isolation and AI Segmentation.*
